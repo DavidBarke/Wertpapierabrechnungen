@@ -1,0 +1,126 @@
+---
+title: "Extract data from Wertpapierabrechnungen PDFs"
+output: html_document
+date: "`r Sys.Date()`"
+params:
+  env_file: ~
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Packages
+
+```{r}
+library(Wertpapierabrechnungen)
+load_packages()
+```
+
+### Load .env file
+
+```{r}
+load_dot_env(env_file(params$env_file))
+```
+
+### Read PDF files
+
+```{r}
+year_folders <- dir(Sys.getenv("DOCUMENT_PATH"))
+
+pdf_files <- year_folders |> map(function(year) {
+  wertpapierabrechnungen_path <- file.path(
+    Sys.getenv("DOCUMENT_PATH"), year
+  )
+  
+  files <- dir(wertpapierabrechnungen_path, full.names = TRUE)
+  
+  files[str_detect(files, "\\.pdf$")]
+}) |> list_c()
+
+pdf_page_1 <- pdf_files |> map(function(pdf_file) {
+  x <- pdftools::pdf_text(pdf_file) |> (\(x) x[1])()
+  tibble(file = pdf_file, text = x, text_sq = x |> str_squish())
+}) |> list_rbind()
+```
+
+### Extract relevant data
+
+```{r}
+extract_is_buy <- function(x) {
+  x |>
+    str_detect("Wertpapierkauf")
+}
+
+extract_date <- function(x) {
+  x |>
+    str_extract("Geschäftstag : [\\d\\.]+") |>
+    str_extract("[\\d\\.]+") |> 
+    dmy()
+}
+
+extract_quantity <- function(x) {
+  x |>
+    str_extract(
+      "(Nennwert Zum (Mischkurs|Kurs) von St [\\d,]+|Summe St [\\d,]+)"
+    ) |>
+    str_extract("[\\d,]+") |>
+    str_replace(",", "\\.") |>
+    as.numeric()
+}
+
+extract_price <- function(x) {
+  x |>
+    str_extract("(Nennwert Zum (Mischkurs|Kurs) von St [\\d,]+ (EUR|USD) [\\d,]+|Summe St [\\d,]+ (EUR|USD) [\\d,]+)") |>
+    str_extract("(EUR|USD) [\\d,]+") |>
+    str_extract("[\\d,]+") |>
+    str_replace(",", "\\.") |>
+    as.numeric()
+}
+
+extract_currency <- function(x) {
+  x |>
+    str_extract("(Nennwert Zum (Mischkurs|Kurs) von St [\\d,]+ (EUR|USD) [\\d,]+|Summe St [\\d,]+ (EUR|USD) [\\d,]+)") |>
+    str_extract("(EUR|USD) [\\d,]+") |>
+    str_extract("(EUR|USD)")
+}
+
+extract_provision <- function(x) {
+  x |>
+    str_extract("(Gesamtp|P)rovision : EUR [\\d,]+") |>
+    str_extract("[\\d,]+") |>
+    str_replace(",", ".") |>
+    as.numeric()
+}
+
+extract_wpknr <- function(x) {
+  x |>
+    str_extract("WPKNR/ISIN\n.*\\s[A-Z0-9]+\n") |>
+    str_extract("(?<=\\s)[A-Z0-9]+$")
+}  
+
+pdf_extracted <- pdf_page_1 |>
+  filter(str_detect(text, "Wertpapier(kauf|verkauf)")) |>
+  mutate(
+    is_buy = extract_is_buy(text_sq),
+    date = extract_date(text_sq),
+    text_sq = str_replace_all(text_sq, "\\.", ""),
+    quantity = extract_quantity(text_sq),
+    price = extract_price(text_sq),
+    currency = extract_currency(text_sq),
+    provision = extract_provision(text_sq),
+    wpknr = extract_wpknr(text)
+  )
+```
+
+### Analyze
+
+```{r}
+pdf_extracted |>
+  mutate(balance = quantity * price * is_buy) |>
+  group_by(currency) |>
+  summarise(
+    balance = sum(balance)
+  )
+```
+
